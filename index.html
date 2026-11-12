@@ -752,8 +752,16 @@ function render() {
     else if (r === 'progresso') html = vProgress();
     else html = '<div class="empty">Página não encontrada. <a href="#inicio">Voltar ao painel</a>.</div>';
   } catch (e) { console.error(e); html = '<div class="empty">Algo deu errado ao montar esta página: ' + esc(e.message) + '</div>'; }
-  document.getElementById('main').innerHTML = '<div class="wrap">' + html + '</div>';
+  document.getElementById('main').innerHTML = '<div class="wrap">' + movedBanner(r) + html + '</div>';
   paintSide(r); paintTop(r); afterRender(r);
+}
+const PAGES_URL = 'https://vitorialemosagomes-cmyk.github.io/apostila-interativa-cientista/';
+function movedBanner(r) {
+  if (!window.claude || typeof window.claude.use !== 'function') return '';
+  return '<div class="card hl" style="margin-bottom:16px"><h3 style="margin-top:0">A apostila agora fica no GitHub Pages</h3>' +
+    '<p class="small" style="margin:0 0 10px">Estude sempre por lá: o progresso sincroniza entre todos os aparelhos. Este link não recebe mais os próximos módulos.' +
+    (r === 'progresso' ? ' Para levar o que você já fez aqui, use <b>Exportar progresso</b> abaixo e depois <b>Importar</b> no GitHub Pages.' : ' Já fez progresso aqui? Exporte em <a href="#progresso">Progresso e backup</a> e importe lá.') +
+    '</p><a class="btn btn-primary btn-sm" href="' + PAGES_URL + '" target="_blank" rel="noopener">Ir para a apostila</a> <span class="small muted" style="user-select:all">' + PAGES_URL + '</span></div>';
 }
 function rerender() { const y = window.scrollY; render(); window.scrollTo(0, y); }
 function afterRender(r) {
