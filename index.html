@@ -518,12 +518,95 @@ const SYNC_TXT = {
   local: ['Salvo neste navegador', ''], loading: ['Conectando à sua conta…', 'warn'], slow: ['Nuvem indisponível agora; salvo neste navegador', 'warn'],
   cache: ['Sincronizando…', 'warn'], synced: ['Salvo na sua conta', 'ok'], readonly: ['Sem permissão de escrita; salvo neste navegador', 'warn'],
   error: ['Falha ao sincronizar; salvo neste navegador', 'warn'],
+  gsynced: ['Sincronizado com o GitHub', 'ok'], gerror: ['Falha ao sincronizar com o GitHub; salvo neste navegador', 'warn'],
+  gauth: ['Chave do GitHub inválida ou sem permissão de Gist; salvo neste navegador', 'warn'],
+};
+
+/* Sincronização fora do Claude (ex.: GitHub Pages): um Gist privado na conta da usuária guarda o progresso.
+   A chave (token com escopo "gist") fica só neste navegador; cada aparelho conecta uma vez. */
+const LS_GH = 'apostila-cd:github:v1', GIST_DESC = 'apostila-cd-progresso (não apague: progresso da apostila)';
+const Gist = {
+  token: null, id: null, on: false, timer: null, inflight: false, again: false, remoteRev: 0, user: '',
+  async api(path, opt) {
+    const r = await fetch('https://api.github.com' + path, Object.assign({ cache: 'no-store' }, opt || {}, {
+      headers: { Authorization: 'Bearer ' + this.token, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' } }));
+    if (!r.ok) { const e = new Error('github ' + r.status); e.status = r.status; throw e; }
+    return r.status === 204 ? null : r.json();
+  },
+  cfg() { try { return JSON.parse(lsGet(LS_GH) || 'null'); } catch (e) { return null; } },
+  async init() {
+    const c = this.cfg(); if (!c || !c.token) return false;
+    this.token = c.token; this.id = c.id || null; this.user = c.user || ''; this.on = true;
+    Store.setStatus('loading');
+    try {
+      if (!this.id) this.id = await this.find();
+      if (this.id) await this.pull(); else await this.create();
+      lsSet(LS_GH, JSON.stringify({ token: this.token, id: this.id, user: this.user }));
+      Store.setStatus('gsynced');
+    } catch (e) { Store.setStatus(e.status === 401 || e.status === 403 || e.status === 404 ? 'gauth' : 'gerror'); }
+    if (!this.listening) {
+      this.listening = true;
+      setInterval(() => { if (document.visibilityState === 'visible') this.pull(); }, 60000);
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.pull(); else if (this.timer) { clearTimeout(this.timer); this.push(); } });
+    }
+    return true;
+  },
+  async find() {
+    for (let page = 1; page <= 10; page++) {
+      const list = await this.api('/gists?per_page=100&page=' + page);
+      const g = list.find(x => x.description === GIST_DESC); if (g) return g.id;
+      if (list.length < 100) break;
+    }
+    return null;
+  },
+  files() { return { 'progresso.json': { content: JSON.stringify(S) }, 'entregas.json': { content: JSON.stringify(T) } }; },
+  async create() { const g = await this.api('/gists', { method: 'POST', body: JSON.stringify({ description: GIST_DESC, public: false, files: this.files() }) }); this.id = g.id; this.remoteRev = S.rev || 0; },
+  async readFile(f) { if (!f) return null; if (!f.truncated) return f.content; const r = await fetch(f.raw_url, { cache: 'no-store' }); return r.ok ? r.text() : null; },
+  async pull() {
+    if (!this.on || !this.id || this.inflight || this.timer) return;
+    try {
+      const g = await this.api('/gists/' + this.id), f = g.files || {};
+      let r = null, t = null;
+      try { r = JSON.parse(await this.readFile(f['progresso.json']) || 'null'); } catch (e) {}
+      try { t = JSON.parse(await this.readFile(f['entregas.json']) || 'null'); } catch (e) {}
+      let changed = false;
+      if (t && typeof t === 'object') Object.keys(t).forEach(k => { if (!T[k] || ((t[k] && t[k].savedAt) || 0) > ((T[k] && T[k].savedAt) || 0)) { T[k] = t[k]; changed = true; } });
+      if (changed) lsSet(LS_TXT, JSON.stringify(T));
+      if (r && r.app === 'apostila-cd') {
+        this.remoteRev = r.rev || 0;
+        const localExam = S.examSession && S.examSession.answers ? S.examSession.answers.length : -1;
+        const remoteExam = r.examSession && r.examSession.answers ? r.examSession.answers.length : -1;
+        if ((r.rev || 0) > (S.rev || 0) && !(localExam > remoteExam)) { S = normalize(clone(r)); lsSet(LS_STATE, JSON.stringify(S)); changed = true; }
+        else if ((r.rev || 0) < (S.rev || 0)) this.schedule(10);
+      } else this.schedule(10);
+      if (changed) rerender();
+      if (Store.status !== 'gsynced') Store.setStatus('gsynced');
+    } catch (e) { Store.setStatus(e.status === 401 || e.status === 403 ? 'gauth' : 'gerror'); }
+  },
+  schedule(ms) { if (!this.on || !this.id) return; clearTimeout(this.timer); this.timer = setTimeout(() => { this.timer = null; this.push(); }, ms == null ? 1500 : ms); },
+  async push() {
+    if (!this.on || !this.id) return;
+    if (this.inflight) { this.again = true; return; }
+    this.inflight = true;
+    try { await this.api('/gists/' + this.id, { method: 'PATCH', body: JSON.stringify({ files: this.files() }) }); this.remoteRev = S.rev || 0; Store.setStatus('gsynced'); }
+    catch (e) { Store.setStatus(e.status === 401 || e.status === 403 ? 'gauth' : 'gerror'); }
+    finally { this.inflight = false; if (this.again) { this.again = false; this.push(); } }
+  },
+  async connect(token) {
+    this.token = token.trim();
+    try {
+      const u = await this.api('/user'); this.user = u.login || '';
+      lsSet(LS_GH, JSON.stringify({ token: this.token, id: null, user: this.user }));
+      this.id = null; await this.init(); toast(this.id ? 'Conectado: o progresso agora sincroniza pelo GitHub.' : 'Não consegui criar o Gist.'); rerender();
+    } catch (e) { this.token = null; toast(e.status === 401 ? 'Chave inválida.' : 'Não consegui conectar ao GitHub agora.'); }
+  },
+  disconnect() { try { localStorage.removeItem(LS_GH); } catch (e) {} clearTimeout(this.timer); this.timer = null; this.on = false; this.token = null; this.id = null; Store.setStatus('local'); rerender(); },
 };
 const Store = {
   ref: null, status: 'local', timer: null, inflight: false, again: false, readonly: false, loading: {},
   setStatus(st) { this.status = st; paintSync(); },
   async init() {
-    if (!window.claude || typeof window.claude.use !== 'function') { this.setStatus('local'); return; }
+    if (!window.claude || typeof window.claude.use !== 'function') { this.setStatus('local'); Gist.init(); return; }
     let db = null, user = null;
     try { const r = await Promise.all([window.claude.use('db'), window.claude.use('user')]); db = r[0]; user = r[1]; } catch (e) {}
     if (!db || !user) { this.setStatus('local'); return; }
@@ -551,6 +634,7 @@ const Store = {
   save() {
     S.rev = (S.rev || 0) + 1; S.updatedAt = Date.now();
     lsSet(LS_STATE, JSON.stringify(S));
+    Gist.schedule();
     if (this.ref && !this.readonly) { clearTimeout(this.timer); this.timer = setTimeout(() => this.push(), 900); }
   },
   async push() {
@@ -567,6 +651,7 @@ const Store = {
   },
   async saveText(id) {
     lsSet(LS_TXT, JSON.stringify(T));
+    Gist.schedule();
     if (!this.ref || this.readonly) return;
     try { await this.ref.collection('entregas').doc(id).set(clone(T[id])); } catch (e) { /* fica no navegador */ }
   },
@@ -1351,7 +1436,13 @@ function vProgress() {
   const s = SYNC_TXT[Store.status] || SYNC_TXT.local;
   let h = '<div class="eyebrow">Conta</div><h1>Progresso e backup</h1>';
   h += '<div class="card"><h3>Onde seu progresso fica salvo</h3><p class="small" style="margin:0"><span class="dot ' + s[1] + '" style="display:inline-block;margin-right:6px"></span>' + s[0] + '. ' +
-    (Store.ref ? 'Respostas, exercícios e revisões ficam na sua conta e acompanham você em qualquer aparelho em que abrir esta apostila.' : 'Neste modo, o progresso fica só neste navegador. Exporte um backup de vez em quando.') + '</p></div>';
+    (Store.ref ? 'Respostas, exercícios e revisões ficam na sua conta e acompanham você em qualquer aparelho em que abrir esta apostila.' :
+     Gist.on ? 'O progresso fica num Gist privado' + (Gist.user ? ' da conta <b>' + esc(Gist.user) + '</b>' : '') + ' no GitHub e acompanha você em qualquer aparelho conectado com a mesma chave.' :
+     'Neste modo, o progresso fica só neste navegador. Conecte ao GitHub abaixo para sincronizar entre aparelhos.') + '</p>' +
+    (Store.ref ? '' : Gist.on ?
+      '<div class="ex-act"><button class="btn btn-sm" data-act="gh-sync">Sincronizar agora</button><button class="btn btn-sm" data-act="gh-off">Desconectar este aparelho</button></div>' :
+      '<p class="small muted" style="margin:12px 0 6px">1. Crie uma chave do GitHub só com a permissão <code>gist</code>: <a href="https://github.com/settings/tokens/new?scopes=gist&amp;description=Apostila%20CD" target="_blank" rel="noopener">abrir o GitHub</a> (marque “No expiration” ou uma validade longa e clique em Generate token).<br>2. Cole a chave aqui e conecte. Repita só isso em cada aparelho novo.</p>' +
+      '<input type="password" id="gh-token" class="ta" style="min-height:0;height:40px" autocomplete="off" placeholder="ghp_…"><div class="ex-act"><button class="btn btn-primary btn-sm" data-act="gh-on">Conectar ao GitHub</button></div>') + '</div>';
   h += '<div class="card"><h3>Relatório para o tutor</h3><p class="small muted" style="margin:0 0 8px">Cole no chat do projeto para atualizar o plano de estudo com base no seu desempenho.</p><textarea class="ta prose-ta" id="report" readonly style="min-height:200px;font:13px/1.5 var(--f-mono)">' + esc(tutorReport()) + '</textarea><div class="ex-act"><button class="btn btn-primary btn-sm" data-act="copy-report">Copiar relatório</button></div></div>';
   h += '<div class="card"><h3>Exportar</h3><p class="small muted" style="margin:0 0 8px">Gera um arquivo .json com todo o progresso, incluindo seus códigos e respostas.</p><button class="btn btn-sm" data-act="export">Exportar progresso</button>' +
     (UI.exportText ? '<p class="small muted" style="margin:10px 0 4px">O download não está disponível aqui. Copie o conteúdo abaixo e guarde num arquivo:</p><textarea class="ta" id="export-text" readonly>' + esc(UI.exportText) + '</textarea><div class="ex-act"><button class="btn btn-sm" data-act="copy-export">Copiar</button></div>' : '') + '</div>';
@@ -1444,6 +1535,9 @@ const ACT = {
   'quiz-start'() { startQuiz(); },
   'quiz-end'() { UI.quiz = null; rerender(); },
   export() { exportProgress(); },
+  'gh-on'() { const t = document.getElementById('gh-token'); if (!t || !t.value.trim()) { toast('Cole a chave do GitHub primeiro.'); return; } Gist.connect(t.value); },
+  'gh-off'() { Gist.disconnect(); toast('Este aparelho não sincroniza mais (o progresso continua salvo nele).'); },
+  async 'gh-sync'() { if (Gist.timer) { clearTimeout(Gist.timer); Gist.timer = null; await Gist.push(); } await Gist.pull(); toast('Sincronizado.'); },
   'import-text'() { const t = document.getElementById('imp-text'); if (!t || !t.value.trim()) { toast('Cole o conteúdo do backup primeiro.'); return; } stageImport(t.value); },
   'import-confirm'() { applyImport(); },
   'import-cancel'() { UI.importText = null; rerender(); },
@@ -1476,7 +1570,7 @@ function stageImport(text) {
 }
 function applyImport() {
   try {
-    const o = JSON.parse(UI.importText), rev = Math.max(S.rev || 0, o.state.rev || 0);
+    const o = JSON.parse(UI.importText), rev = Math.max(S.rev || 0, o.state.rev || 0, Gist.remoteRev || 0);
     S = normalize(o.state); S.rev = rev; T = o.entregas || {};
     lsSet(LS_TXT, JSON.stringify(T)); UI.importText = null; Store.save();
     Object.keys(T).forEach(id => Store.saveText(id));
