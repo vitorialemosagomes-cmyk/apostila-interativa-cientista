@@ -681,7 +681,7 @@ function modStatus(id) {
   const i = MODS.findIndex(m => m.id === id);
   if (i < 0) return 'bloqueado';
   if (examInfo(id).passed) return 'aprovado';
-  if (i > 0 && modStatus(MODS[i - 1].id) !== 'aprovado') return 'bloqueado';
+  // a pedido da usuária (12/11), todos os módulos prontos ficam abertos, sem exigir a aprovação no anterior
   return MODS[i].built ? 'andamento' : 'construcao';
 }
 const isOpen = id => { const s = modStatus(id); return s === 'andamento' || s === 'aprovado'; };
@@ -727,7 +727,8 @@ function assessOf(key) {
   const ex = EXAMS[key];
   return { key, kind: 'exam', title: 'Avaliação do Módulo ' + m.num, versions: Object.keys(ex).sort(), list: v => ex[v] || [], minutes: 50, href: 'avaliacao-' + key, back: key, backLabel: 'Módulo ' + m.num, mod: key };
 }
-const assessOpen = a => a.kind === 'sim' ? modStatus(a.mod) === 'aprovado' : isOpen(a.mod);
+const simOpen = s => !!(MODMAP[s.after] && MODMAP[s.after].built);
+const assessOpen = a => a.kind === 'sim' ? simOpen(a.sim) : isOpen(a.mod);
 
 /* ======================= roteamento ======================= */
 function route() { return (location.hash || '').replace(/^#/, '') || 'inicio'; }
@@ -823,7 +824,7 @@ function nextStep() {
   if (EXAMS[cm] && !examInfo(cm).passed) return { t: 'Avaliação do Módulo ' + M.num, d: '20 questões no formato da prova: penalidade, sem voltar, nota líquida mínima de 80%.', h: 'avaliacao-' + cm, b: 'Ir para a avaliação' };
   return { t: 'Reta final', d: 'Faça os simulados finais e mantenha a revisão dos pontos fracos.', h: 'simulados', b: 'Ver simulados' };
 }
-function openSims() { return SIMS.filter(s => modStatus(s.after) === 'aprovado' && !examInfo(s.id).attempts.length); }
+function openSims() { return SIMS.filter(s => simOpen(s) && !examInfo(s.id).attempts.length); }
 function vHome() {
   const due = dueCards().length, next = nextStep(), os = openSims();
   let ans = 0, ok = 0; Object.values(S.answers).forEach(a => { ans++; if (a.ok) ok++; });
@@ -897,7 +898,7 @@ function vModule(id) {
     const info = examInfo(id), lastA = info.attempts[info.attempts.length - 1];
     exCard = '<div class="card ' + (info.passed ? '' : 'hl') + '"><h3>Avaliação do módulo</h3><p class="small muted" style="margin:0 0 10px">20 questões no formato da prova (penalidade, sem voltar). Aprovação com nota líquida de 80%.' + (lastA ? ' Última tentativa: ' + lastA.pct + '%.' : '') + '</p><a class="btn ' + (info.passed ? '' : 'btn-primary') + '" href="#avaliacao-' + id + '">' + (info.passed ? 'Ver resultados' : 'Ir para a avaliação') + '</a></div>';
   }
-  const sims = SIMS.filter(s => s.module === id).map(s => '<div class="card"><h3>' + esc(s.title) + '</h3><p class="small muted" style="margin:0 0 10px">' + esc(s.covers) + ' · ' + s.questions.length + ' questões. ' + (modStatus(s.after) === 'aprovado' ? 'Disponível.' : 'Libera com a aprovação no Módulo ' + MODMAP[s.after].num + '.') + '</p><a class="btn btn-sm" href="#simulado-' + s.id + '">Abrir</a></div>').join('');
+  const sims = SIMS.filter(s => s.module === id).map(s => '<div class="card"><h3>' + esc(s.title) + '</h3><p class="small muted" style="margin:0 0 10px">' + esc(s.covers) + ' · ' + s.questions.length + ' questões. ' + (simOpen(s) ? 'Disponível.' : 'Libera quando o Módulo ' + MODMAP[s.after].num + ' estiver pronto.') + '</p><a class="btn btn-sm" href="#simulado-' + s.id + '">Abrir</a></div>').join('');
   const info = m.info || { intro: '', biblio: [] };
   return head + (info.intro ? '<div class="prose lead">' + info.intro + '</div>' : '') + ementa + '<h2 class="sec">Aulas</h2><div class="sched">' + lessons + '</div>' + exCard + sims + mastery +
     (info.biblio && info.biblio.length ? '<div class="card"><h3>Bibliografia complementar</h3><ul class="small" style="margin:0;padding-left:20px">' + info.biblio.map(b => '<li>' + b + '</li>').join('') + '</ul></div>' : '');
@@ -1423,8 +1424,8 @@ function vSims() {
     if (!m.simulado) return;
     const built = SIMS.filter(s => s.module === m.id);
     if (built.length) built.forEach(s => {
-      const open = modStatus(s.after) === 'aprovado', att = examInfo(s.id).attempts, best = att.length ? Math.max.apply(null, att.map(x => x.pct)) : null;
-      rows += '<a class="mrow' + (open ? (att.length ? ' pass' : ' cur') : ' lock') + '" href="#simulado-' + s.id + '"><div class="mn">' + ic(open ? (att.length ? 'check' : 'target') : 'lock', ' width="16" height="16"') + '</div><div style="min-width:0"><div class="mt">' + esc(s.title) + '</div><div class="mm"><span>' + esc(s.covers) + '</span><span>' + s.questions.length + ' questões</span><span>~' + s.minutes + ' min</span>' + (open ? '' : '<span>libera com a aprovação no Módulo ' + MODMAP[s.after].num + '</span>') + '</div></div><div class="md">' + (best != null ? 'melhor: ' + best + '%' : open ? 'disponível' : 'bloqueado') + '</div></a>';
+      const open = simOpen(s), att = examInfo(s.id).attempts, best = att.length ? Math.max.apply(null, att.map(x => x.pct)) : null;
+      rows += '<a class="mrow' + (open ? (att.length ? ' pass' : ' cur') : ' lock') + '" href="#simulado-' + s.id + '"><div class="mn">' + ic(open ? (att.length ? 'check' : 'target') : 'lock', ' width="16" height="16"') + '</div><div style="min-width:0"><div class="mt">' + esc(s.title) + '</div><div class="mm"><span>' + esc(s.covers) + '</span><span>' + s.questions.length + ' questões</span><span>~' + s.minutes + ' min</span>' + (open ? '' : '<span>libera quando o Módulo ' + MODMAP[s.after].num + ' estiver pronto</span>') + '</div></div><div class="md">' + (best != null ? 'melhor: ' + best + '%' : open ? 'disponível' : 'bloqueado') + '</div></a>';
     });
     else rows += '<div class="mrow lock"><div class="mn">' + ic('clock', ' width="16" height="16"') + '</div><div><div class="mt">' + esc(m.simulado) + '</div><div class="mm"><span>chega com o Módulo ' + m.num + ' (' + esc(m.title) + ')</span></div></div><div class="md">' + (m.built ? '' : 'em construção') + '</div></div>';
   });
